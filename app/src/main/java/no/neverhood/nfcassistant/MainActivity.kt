@@ -1,0 +1,434 @@
+package no.neverhood.nfcassistant
+
+import android.Manifest
+import android.app.PendingIntent
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.nfc.NdefMessage
+import android.nfc.NdefRecord
+import android.nfc.NfcAdapter
+import android.nfc.Tag
+import android.nfc.tech.Ndef
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.snackbar.Snackbar
+import no.neverhood.nfcassistant.databinding.ActivityMainBinding
+import timber.log.Timber
+import androidx.core.net.toUri
+
+
+class MainActivity : AppCompatActivity() {
+    private var currentMediaId = ""
+    private var mediaIdToWrite: String? = null
+    private var mediaTypeToWrite: Enum<MediaTypes>? = null
+    private var writeDialog: AlertDialog? = null
+
+    private var nfcAdapter: NfcAdapter? = null
+    private lateinit var binding: ActivityMainBinding
+
+    private var pn532Manager: Pn532Manager? = null
+
+    private val bluetoothStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                when (state) {
+                    BluetoothAdapter.STATE_OFF -> {
+                        setStatus("Skru på Blåtann for å koble til ekstern NFC leser")
+                    }
+                    BluetoothAdapter.STATE_ON -> {
+                        pn532Manager?.initBluetooth()
+                    }
+                }
+            }
+        }
+    }
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val allGranted = permissions.entries.all { it.value }
+        if (!allGranted) {
+            Snackbar.make(binding.root, "Bluetooth permissions are required", Snackbar.LENGTH_INDEFINITE)
+                .setAction("Retry") { checkPermissionsAndInit() }
+                .show()
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        
+        ViewCompat.setOnApplyWindowInsetsListener(binding.main) { v, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
+            insets
+        }
+
+        // Init Timber
+        Timber.plant(Timber.DebugTree())   // This forwards logs to android.util.Log → Logcat
+
+        // Init NFC
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+
+        // Check permissions and then init Bluetooth
+        pn532Manager = Pn532Manager(this)
+        checkPermissionsAndInit()
+
+        // Bluetooth state receiver
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        registerReceiver(bluetoothStateReceiver, filter)
+        checkBluetoothState()
+
+        // TODO Init MediaSessionManager
+        checkNotificationPermission()
+        //setMediaTargetPackage("com.google.android.youtube")
+
+        // Process the intent that started the activity
+        handleIntent(intent)
+    }
+
+    fun setStatus(text: String) {
+        runOnUiThread {
+            binding.textStatus.text = text
+        }
+    }
+
+    private fun checkBluetoothState() {
+        val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
+        val bluetoothAdapter = bluetoothManager.adapter
+        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
+            setStatus("Skru på Blåtann for å koble til ekstern NFC leser")
+        } else {
+            pn532Manager?.initBluetooth()
+        }
+    }
+
+    private fun showWriteDialog() {
+        val dialogView = layoutInflater.inflate(R.layout.dialog_write_nfc, null)
+        writeDialog = MaterialAlertDialogBuilder(this)
+            .setTitle("Skriv til NFC Tag")
+            .setView(dialogView)
+            .setNegativeButton("Avbryt") { _, _ ->
+                mediaIdToWrite = null
+            }
+            .setOnDismissListener {
+                writeDialog = null
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun updateWriteDialogMessage(message: String) {
+        writeDialog?.findViewById<android.widget.TextView>(R.id.text_dialog_message)?.text = message
+    }
+
+    // Bluetooth functions
+    fun checkPermissionsAndInit() {
+        val permissions = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
+        val missingPermissions = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (!missingPermissions.isEmpty()) {
+            requestPermissionLauncher.launch(missingPermissions.toTypedArray())
+        }
+    }
+
+    // MediaSessionManager functions
+    private fun checkNotificationPermission() {
+        if (!isNotificationServiceEnabled()) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Gi tilgang til varsler")
+                .setMessage("Appen trenger tilgang til varsler for å kunne se hva som spiller av media på telefonen.")
+                .setPositiveButton("Innstillinger") { _, _ ->
+                    startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
+                }
+                .setNegativeButton("Avbryt", null)
+                .show()
+        }
+    }
+
+    private fun isNotificationServiceEnabled(): Boolean {
+        val pkgName = this.packageName
+        val flat = android.provider.Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
+        if (!flat.isNullOrEmpty()) {
+            val names = flat.split(":")
+            for (name in names) {
+                val cn = ComponentName.unflattenFromString(name)
+                if (cn != null && cn.packageName == pkgName) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    // Parser functions
+    private enum class MediaTypes {
+        YOUTUBE,
+        SPOTIFY,
+        TIDAL,
+        PHONE_NUMBER,
+    }
+
+    private fun extractYoutubeId(url: String): String? {
+        val patterns = listOf(
+            "v=([^&]+)",
+            "youtu.be/([^?]+)",
+            "embed/([^?]+)",
+            "shorts/([^?]+)"
+        )
+        for (pattern in patterns) {
+            val regex = Regex(pattern)
+            val match = regex.find(url)
+            if (match != null) return match.groupValues[1]
+        }
+        return null
+    }
+
+    private fun extractSpotifyId(url: String): String? {
+        val regex = Regex("https://open.spotify.com/track/([a-zA-Z0-9]+)")
+        val match = regex.find(url)
+        if (match != null) return match.groupValues[1]
+        return null
+    }
+
+    // YouTube functions
+    fun extractAndPlayMedia(data: android.net.Uri) {
+        // TODO: Move write operations here and support writing to external device?
+        val youTubeId = data.getQueryParameter("yt") ?: data.toString().substringAfter("yt=", "")
+        if (youTubeId.isNotBlank()) {
+            playMedia(youTubeId, MediaTypes.YOUTUBE)
+        }
+        val spotifyId = data.getQueryParameter("sp") ?: data.toString().substringAfter("sp=", "")
+        if (spotifyId.isNotBlank()) {
+            playMedia(spotifyId, MediaTypes.SPOTIFY)
+        }
+    }
+
+    private fun playMedia(mediaId: String, mediaType: Enum<MediaTypes>) {
+        if (mediaId == currentMediaId) {
+            Timber.d("Already playing $mediaId")
+            return
+        }
+        Timber.d("Playing media: $mediaId")
+        //currentMediaId = mediaId
+
+        var uri: Uri? = null
+        when (mediaType) {
+            MediaTypes.YOUTUBE -> {
+                val timestamp = System.currentTimeMillis()
+                uri = "https://www.youtube.com/watch?v=$mediaId&t=1&cb=$timestamp".toUri()
+            }
+            MediaTypes.SPOTIFY -> {
+                uri = "spotify:track:$mediaId".toUri()
+            }
+            MediaTypes.TIDAL -> {
+                uri = "tidal://track/$mediaId".toUri()
+            }
+        }
+
+        if (uri != null) {
+            val intent = Intent(Intent.ACTION_VIEW, uri)
+
+            startActivity(intent)
+        }
+    }
+
+    // NFC functions
+    override fun onResume() {
+        super.onResume()
+        enableNfcForegroundDispatch()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        nfcAdapter?.disableForegroundDispatch(this)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(bluetoothStateReceiver)
+    }
+
+    private fun enableNfcForegroundDispatch() {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_MUTABLE)
+        } else {
+            PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT)
+        }
+        nfcAdapter?.enableForegroundDispatch(this, pendingIntent, null, null)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        Timber.d("onNewIntent: ${intent.action}")
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent == null) return
+
+        // Handle Shared Text (YouTube link)
+        if (intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
+            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+            if (sharedText != null) {
+                val videoId = extractYoutubeId(sharedText)
+                if (videoId != null) {
+                    mediaIdToWrite = videoId
+                    mediaTypeToWrite = MediaTypes.YOUTUBE
+                    showWriteDialog()
+                }
+                val spotifyId = extractSpotifyId(sharedText)
+                if (spotifyId != null) {
+                    mediaIdToWrite = spotifyId
+                    mediaTypeToWrite = MediaTypes.SPOTIFY
+                    showWriteDialog()
+                }
+            }
+            return
+        }
+
+        when (intent.action) {
+            NfcAdapter.ACTION_NDEF_DISCOVERED,
+            NfcAdapter.ACTION_TECH_DISCOVERED,
+            NfcAdapter.ACTION_TAG_DISCOVERED -> {
+                val tag = intent.getParcelableExtra<Tag>(NfcAdapter.EXTRA_TAG)
+                if (mediaIdToWrite != null && tag != null) {
+                    writeToTag(tag, mediaIdToWrite!!, mediaTypeToWrite!!)
+                    return
+                }
+
+                // 1. Try to get NDEF data from URI (standard for our nfcmp:// scheme)
+                val data = intent.data
+                if (data != null && data.scheme == "nfcmp") {
+                    extractAndPlayMedia(data)
+                    return
+                } else if(data != null && data.scheme == "nfca") {
+                    extractAndPlayMedia(data)
+                    return
+                } else {
+                    Timber.d("Incorrect NDEF data found in intent")
+                    // It might be a generic tag or one we're supposed to read via NDEF messages
+                }
+
+                // 2. Try to get NDEF data from messages in the intent
+                val rawMsgs = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES)
+                if (rawMsgs != null) {
+                    for (rawMsg in rawMsgs) {
+                        val msg = rawMsg as NdefMessage
+                        for (record in msg.records) {
+                            val uri = record.toUri()
+                            if (uri != null && uri.scheme == "nfcmp") {
+                                extractAndPlayMedia(uri)
+                                return
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun writeToTag(tag: Tag, mediaId: String, mediaType: Enum<MediaTypes>) {
+        val ndef = Ndef.get(tag)
+        if (ndef == null) {
+            val error = "NFC tag støtter ikke NDEF"
+            if (writeDialog != null) {
+                updateWriteDialogMessage("$error. Prøv en annen tag.")
+            } else {
+                Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        var typeIndicator = ""
+        when (mediaType) {
+            MediaTypes.YOUTUBE -> {
+                typeIndicator = "yt"
+            }
+            MediaTypes.SPOTIFY -> {
+                typeIndicator = "sp"
+            }
+            MediaTypes.TIDAL -> {
+                typeIndicator = "td"
+            }
+            MediaTypes.PHONE_NUMBER -> {
+                typeIndicator = "ph"
+            }
+        }
+
+        val uri = "nfca://e?$typeIndicator=$mediaId"
+        val record = NdefRecord.createUri(uri)
+        val message = NdefMessage(arrayOf(record))
+
+        try {
+            ndef.connect()
+            if (!ndef.isWritable) {
+                val error = "NFC tag er ikke skrivbar"
+                if (writeDialog != null) {
+                    updateWriteDialogMessage("$error. Prøv en annen tag.")
+                } else {
+                    Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                }
+                return
+            }
+            if (ndef.maxSize < message.toByteArray().size) {
+                val error = "NFC tag har for lite plass"
+                if (writeDialog != null) {
+                    updateWriteDialogMessage("$error. Prøv en annen tag.")
+                } else {
+                    Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                }
+                return
+            }
+            ndef.writeNdefMessage(message)
+            mediaIdToWrite = null
+            writeDialog?.dismiss()
+            Snackbar.make(binding.root, "Tag date skrevet!", Snackbar.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Timber.e(e, "Error writing to tag")
+            val error = "Feil ved skriving til tag"
+            if (writeDialog != null) {
+                updateWriteDialogMessage("$error. Prøv igjen.")
+            } else {
+                Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+            }
+        } finally {
+            try {
+                ndef.close()
+            } catch (e: Exception) {
+                Timber.e(e, "Error closing ndef")
+            }
+        }
+    }
+}

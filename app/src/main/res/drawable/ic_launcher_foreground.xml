@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Scaled and centered group to fit safe zone (66dp) -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.65"
+        android:scaleY="0.65"
+        android:translateX="0"
+        android:translateY="0">
+
+        <!-- WiFi-style Waves (starting with a dot above the notes) -->
+        <!-- The Dot -->
+        <path
+            android:fillColor="#0D47A1"
+            android:pathData="M54,42 m-2.5,0 a2.5,2.5 0 1,1 5,0 a2.5,2.5 0 1,1 -5,0" />
+        <!-- Wave 1 -->
+        <path
+            android:strokeColor="#0D47A1"
+            android:strokeWidth="5"
+            android:strokeLineCap="round"
+            android:pathData="M44,32 A14.14,14.14 0 0,1 64,32" />
+        <!-- Wave 2 -->
+        <path
+            android:strokeColor="#0D47A1"
+            android:strokeWidth="5"
+            android:strokeLineCap="round"
+            android:pathData="M34,22 A28.28,28.28 0 0,1 74,22" />
+
+        <!-- Double Connected Musical Note -->
+        <!-- Note 1 (Lower Left) -->
+        <path
+            android:fillColor="#0D47A1"
+            android:pathData="M42,55 v30 c0,4.42-3.58,8-8,8s-8-3.58-8-8 3.58-8 8-8 c1.6,0 3.08,0.47 4.31,1.28 V55 z" />
+        <!-- Note 2 (Higher Right) -->
+        <path
+            android:fillColor="#0D47A1"
+            android:pathData="M66,47 v30 c0,4.42-3.58,8-8,8s-8-3.58-8-8 3.58-8 8-8 c1.6,0 3.08,0.47 4.31,1.28 V47 z" />
+        <!-- Connecting Beam -->
+        <path
+            android:fillColor="#0D47A1"
+            android:pathData="M42,55 L66,47 v8 L42,63 z" />
+    </group>
+</vector>
