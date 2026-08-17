@@ -17,16 +17,6 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <RadioGroup
-            android:id="@+id/radio_play_type"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:layout_marginTop="20dp"
-            android:checkedButton="@+id/radio_play_music">
-
-        </RadioGroup>
-
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="300dp"
@@ -34,6 +24,29 @@
             android:gravity="center"
             android:textSize="18pt"
             android:text="Scan NFC brikke\n for å starte avspilling" />
+
+        <RadioGroup
+            android:id="@+id/radio_play_type"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="20dp"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/radio_youtube"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="YouTube"
+                android:checked="true" />
+
+            <RadioButton
+                android:id="@+id/radio_youtube_music"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="YouTube Music" />
+
+        </RadioGroup>
 
     </LinearLayout>
 

@@ -18,6 +18,10 @@ import android.nfc.Tag
 import android.nfc.tech.Ndef
 import android.os.Build
 import android.os.Bundle
+import android.media.MediaMetadata
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -34,6 +38,9 @@ import androidx.core.net.toUri
 
 class MainActivity : AppCompatActivity() {
     private var currentMediaId = ""
+    private var currentMediaType: Enum<MediaTypes> = MediaTypes.UNKNOWN
+    private var currentMediaIsPlaying = false
+    private var youTubeVariant: MediaTypes = MediaTypes.YOUTUBE
     private var mediaIdToWrite: String? = null
     private var mediaTypeToWrite: Enum<MediaTypes>? = null
     private var writeDialog: AlertDialog? = null
@@ -42,6 +49,30 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
 
     private var pn532Manager: Pn532Manager? = null
+
+    private lateinit var mediaSessionManager: MediaSessionManager
+    private val activeControllers = mutableMapOf<String, MediaController>()
+
+    private val packageNames = mapOf(
+        MediaTypes.YOUTUBE to "com.google.android.youtube",
+        MediaTypes.YOUTUBE_MUSIC to "com.google.android.apps.youtube.music",
+        MediaTypes.SPOTIFY to "com.spotify.music",
+        MediaTypes.TIDAL to "com.aspiro.tidal"
+    )
+
+    private val mediaControllerCallback = object : MediaController.Callback() {
+        override fun onMetadataChanged(metadata: MediaMetadata?) {
+            metadata?.let { handleMediaMetadata(it) }
+        }
+
+        override fun onPlaybackStateChanged(state: PlaybackState?) {
+            state?.let { handleMediaPlaybackState(it) }
+        }
+    }
+
+    private val sessionsChangedListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
+        updateActiveControllers(controllers)
+    }
 
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -97,9 +128,26 @@ class MainActivity : AppCompatActivity() {
         registerReceiver(bluetoothStateReceiver, filter)
         checkBluetoothState()
 
-        // TODO Init MediaSessionManager
+        // Init MediaSessionManager
+        mediaSessionManager = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
         checkNotificationPermission()
-        //setMediaTargetPackage("com.google.android.youtube")
+        if (isNotificationServiceEnabled()) {
+            mediaSessionManager.addOnActiveSessionsChangedListener(
+                sessionsChangedListener,
+                ComponentName(this, MediaNotificationListenerService::class.java)
+            )
+            // Initial check for active sessions
+            updateActiveControllers(mediaSessionManager.getActiveSessions(ComponentName(this, MediaNotificationListenerService::class.java)))
+        }
+
+        // Set YouTube variant listener
+        binding.radioPlayType.setOnCheckedChangeListener { _, checkedId ->
+            youTubeVariant = when (checkedId) {
+                R.id.radio_youtube_music -> MediaTypes.YOUTUBE_MUSIC
+                else -> MediaTypes.YOUTUBE
+            }
+            Timber.d("YouTube variant changed to: $youTubeVariant")
+        }
 
         // Process the intent that started the activity
         handleIntent(intent)
@@ -171,6 +219,20 @@ class MainActivity : AppCompatActivity() {
                 .setNegativeButton("Avbryt", null)
                 .show()
         }
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Vis over andre apper")
+                .setMessage("Appen trenger tillatelse til å 'Vise over andre apper' for å kunne starte avspilling når den ligger i bakgrunnen.")
+                .setPositiveButton("Innstillinger") { _, _ ->
+                    val intent = Intent(
+                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                    startActivity(intent)
+                }
+                .setNegativeButton("Avbryt", null)
+                .show()
+        }
     }
 
     private fun isNotificationServiceEnabled(): Boolean {
@@ -188,9 +250,65 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
+    private fun updateActiveControllers(controllers: List<MediaController>?) {
+        val newControllers = controllers ?: emptyList()
+        val supportedPackages = packageNames.values
+
+        // Remove controllers that are no longer active
+        val iterator = activeControllers.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (newControllers.none { it.sessionToken == entry.value.sessionToken }) {
+                entry.value.unregisterCallback(mediaControllerCallback)
+                iterator.remove()
+                Timber.d("Controller removed for: ${entry.key}")
+            }
+        }
+
+        // Add or update controllers
+        newControllers.forEach { controller ->
+            if (supportedPackages.contains(controller.packageName)) {
+                val existing = activeControllers[controller.packageName]
+                if (existing?.sessionToken != controller.sessionToken) {
+                    existing?.unregisterCallback(mediaControllerCallback)
+                    controller.registerCallback(mediaControllerCallback)
+                    activeControllers[controller.packageName] = controller
+                    Timber.d("Controller bound for: ${controller.packageName}")
+
+                    controller.metadata?.let { handleMediaMetadata(it) }
+                    controller.playbackState?.let { handleMediaPlaybackState(it) }
+                }
+            }
+        }
+    }
+
+    private fun handleMediaMetadata(metadata: MediaMetadata) {
+        val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
+        val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
+        val mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
+
+        Timber.d("Media Metadata: title=$title, artist=$artist, mediaId=$mediaId")
+
+        if (mediaId != null) {
+            if (mediaId.startsWith("spotify:track:")) {
+                currentMediaId = mediaId.substringAfter("spotify:track:")
+                Timber.d("Extracted Spotify ID: $currentMediaId")
+            } else if (mediaId.length == 11) { // Common length for YT video IDs
+                currentMediaId = mediaId
+            }
+        }
+    }
+
+    private fun handleMediaPlaybackState(state: PlaybackState) {
+        currentMediaIsPlaying = state.state == PlaybackState.STATE_PLAYING
+        Timber.d("Media Playback State: playing=$currentMediaIsPlaying")
+    }
+
     // Parser functions
     private enum class MediaTypes {
+        UNKNOWN,
         YOUTUBE,
+        YOUTUBE_MUSIC,
         SPOTIFY,
         TIDAL,
         PHONE_NUMBER,
@@ -223,7 +341,7 @@ class MainActivity : AppCompatActivity() {
         // TODO: Move write operations here and support writing to external device?
         val youTubeId = data.getQueryParameter("yt") ?: data.toString().substringAfter("yt=", "")
         if (youTubeId.isNotBlank()) {
-            playMedia(youTubeId, MediaTypes.YOUTUBE)
+            playMedia(youTubeId, youTubeVariant)
         }
         val spotifyId = data.getQueryParameter("sp") ?: data.toString().substringAfter("sp=", "")
         if (spotifyId.isNotBlank()) {
@@ -232,30 +350,49 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun playMedia(mediaId: String, mediaType: Enum<MediaTypes>) {
-        if (mediaId == currentMediaId) {
-            Timber.d("Already playing $mediaId")
+        if (mediaId == currentMediaId && mediaType == currentMediaType && currentMediaIsPlaying) {
+            Timber.d("Already playing $mediaId on $mediaType")
             return
         }
         Timber.d("Playing media: $mediaId")
-        //currentMediaId = mediaId
+        currentMediaId = mediaId
+        currentMediaType = mediaType
 
         var uri: Uri? = null
         when (mediaType) {
             MediaTypes.YOUTUBE -> {
-                val timestamp = System.currentTimeMillis()
-                uri = "https://www.youtube.com/watch?v=$mediaId&t=1&cb=$timestamp".toUri()
+                uri = "https://www.youtube.com/watch?v=$mediaId".toUri()
+            }
+            MediaTypes.YOUTUBE_MUSIC -> {
+                uri = "https://music.youtube.com/watch?v=$mediaId".toUri()
             }
             MediaTypes.SPOTIFY -> {
-                uri = "spotify:track:$mediaId".toUri()
+                //uri = "spotify:track:$mediaId".toUri()
+                uri = "https://open.spotify.com/track/$mediaId".toUri()
             }
             MediaTypes.TIDAL -> {
                 uri = "tidal://track/$mediaId".toUri()
             }
+            MediaTypes.PHONE_NUMBER -> {
+                // Not a media type
+            }
         }
 
         if (uri != null) {
-            val intent = Intent(Intent.ACTION_VIEW, uri)
+            // Try to use MediaController if the app has an active session
+            val packageName = packageNames[mediaType]
+            val controller = activeControllers[packageName]
 
+            if (controller != null) {
+                Timber.d("Media controller found for $packageName, sending play command")
+                controller.transportControls.playFromUri(uri, null)
+                //controller.transportControls.playFromMediaId(mediaId, null)
+                return
+            }
+
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             startActivity(intent)
         }
     }
@@ -274,6 +411,11 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(bluetoothStateReceiver)
+        if (::mediaSessionManager.isInitialized) {
+            mediaSessionManager.removeOnActiveSessionsChangedListener(sessionsChangedListener)
+        }
+        activeControllers.values.forEach { it.unregisterCallback(mediaControllerCallback) }
+        activeControllers.clear()
     }
 
     private fun enableNfcForegroundDispatch() {
@@ -373,7 +515,7 @@ class MainActivity : AppCompatActivity() {
 
         var typeIndicator = ""
         when (mediaType) {
-            MediaTypes.YOUTUBE -> {
+            MediaTypes.YOUTUBE, MediaTypes.YOUTUBE_MUSIC -> {
                 typeIndicator = "yt"
             }
             MediaTypes.SPOTIFY -> {
