@@ -18,6 +18,7 @@ import android.nfc.Tag
 import android.nfc.tech.Ndef
 import android.os.Build
 import android.os.Bundle
+import android.app.ActivityOptions
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
@@ -367,8 +368,7 @@ class MainActivity : AppCompatActivity() {
                 uri = "https://music.youtube.com/watch?v=$mediaId".toUri()
             }
             MediaTypes.SPOTIFY -> {
-                //uri = "spotify:track:$mediaId".toUri()
-                uri = "https://open.spotify.com/track/$mediaId".toUri()
+                uri = "spotify:track:$mediaId".toUri()
             }
             MediaTypes.TIDAL -> {
                 uri = "tidal://track/$mediaId".toUri()
@@ -383,17 +383,35 @@ class MainActivity : AppCompatActivity() {
             val packageName = packageNames[mediaType]
             val controller = activeControllers[packageName]
 
-            if (controller != null) {
+            // YouTube works well with MediaController, but Spotify often triggers BAL blocks.
+            // For Spotify, we use a PendingIntent with an explicit BAL bypass.
+            if (controller != null && mediaType != MediaTypes.SPOTIFY) {
                 Timber.d("Media controller found for $packageName, sending play command")
                 controller.transportControls.playFromUri(uri, null)
-                //controller.transportControls.playFromMediaId(mediaId, null)
                 return
             }
 
+            Timber.d("Launching $packageName via Intent with BAL bypass")
             val intent = Intent(Intent.ACTION_VIEW, uri).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            startActivity(intent)
+
+            try {
+                val options = ActivityOptions.makeBasic()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    @Suppress("DEPRECATION")
+                    options.pendingIntentBackgroundActivityStartMode = ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                }
+                
+                val pendingIntent = PendingIntent.getActivity(
+                    this, 0, intent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                pendingIntent.send(this, 0, null, null, null, null, options.toBundle())
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to launch activity via PendingIntent bypass")
+                startActivity(intent)
+            }
         }
     }
 
