@@ -28,6 +28,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
+import androidx.core.content.edit
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -39,19 +41,25 @@ import java.time.Instant
 
 
 class MainActivity : AppCompatActivity() {
+    private val PREFS_NAME = "nfc_assistant_prefs"
+    private val KEY_YOUTUBE_VARIANT = "youtube_variant"
+
+    // Settings
+    private var youTubeVariant: MediaTypes = MediaTypes.YOUTUBE
+
     // Current media vars
     private var currentMediaId = ""
     private var currentMediaTitle = ""
     private var currentMediaType: Enum<MediaTypes> = MediaTypes.UNKNOWN
     private var currentMediaIsPlaying = false
     private var lastMediaPlay: Instant = Instant.MIN
-    private var youTubeVariant: MediaTypes = MediaTypes.YOUTUBE
 
     // Write vars
     private var mediaIdToWrite: String? = null
     private var mediaTypeToWrite: Enum<MediaTypes>? = null
     private var writeDialog: AlertDialog? = null
 
+    // Resources
     private var nfcAdapter: NfcAdapter? = null
     private lateinit var binding: ActivityMainBinding
 
@@ -149,12 +157,28 @@ class MainActivity : AppCompatActivity() {
             updateActiveControllers(mediaSessionManager.getActiveSessions(ComponentName(this, MediaNotificationListenerService::class.java)))
         }
 
+        // Load and set YouTube variant
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val savedVariant = prefs.getString(KEY_YOUTUBE_VARIANT, MediaTypes.YOUTUBE.name)
+        youTubeVariant = try {
+            MediaTypes.valueOf(savedVariant ?: MediaTypes.YOUTUBE.name)
+        } catch (_: Exception) {
+            MediaTypes.YOUTUBE
+        }
+
+        if (youTubeVariant == MediaTypes.YOUTUBE_MUSIC) {
+            binding.radioPlayType.check(R.id.radio_youtube_music)
+        } else {
+            binding.radioPlayType.check(R.id.radio_youtube)
+        }
+
         // Set YouTube variant listener
         binding.radioPlayType.setOnCheckedChangeListener { _, checkedId ->
             youTubeVariant = when (checkedId) {
                 R.id.radio_youtube_music -> MediaTypes.YOUTUBE_MUSIC
                 else -> MediaTypes.YOUTUBE
             }
+            prefs.edit { putString(KEY_YOUTUBE_VARIANT, youTubeVariant.name) }
             Timber.d("YouTube variant changed to: $youTubeVariant")
         }
 
@@ -254,7 +278,7 @@ class MainActivity : AppCompatActivity() {
                 .setPositiveButton("Innstillinger") { _, _ ->
                     val intent = Intent(
                         android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:$packageName")
+                        "package:$packageName".toUri()
                     )
                     startActivity(intent)
                 }
@@ -525,7 +549,7 @@ class MainActivity : AppCompatActivity() {
             NfcAdapter.ACTION_NDEF_DISCOVERED,
             NfcAdapter.ACTION_TECH_DISCOVERED,
             NfcAdapter.ACTION_TAG_DISCOVERED -> {
-                val tag = intent.getParcelableExtra<Tag>(NfcAdapter.EXTRA_TAG)
+                val tag = IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag::class.java)
                 if (mediaIdToWrite != null && tag != null) {
                     writeToTag(tag, mediaIdToWrite!!, mediaTypeToWrite!!)
                     return
@@ -545,7 +569,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 // 2. Try to get NDEF data from messages in the intent
-                val rawMsgs = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES)
+                val rawMsgs = IntentCompat.getParcelableArrayExtra(intent, NfcAdapter.EXTRA_NDEF_MESSAGES, NdefMessage::class.java)
                 if (rawMsgs != null) {
                     for (rawMsg in rawMsgs) {
                         val msg = rawMsg as NdefMessage

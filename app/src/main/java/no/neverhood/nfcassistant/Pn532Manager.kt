@@ -194,7 +194,6 @@ class Pn532Manager(val activity: MainActivity) {
             }
         }
 
-        // TODO clean up connection and notification
         Timber.d("readTagLoop ended")
     }
 
