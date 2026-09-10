@@ -23,6 +23,7 @@ import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.widget.TextView
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -62,6 +63,10 @@ class MainActivity : AppCompatActivity() {
     // Resources
     private var nfcAdapter: NfcAdapter? = null
     private lateinit var binding: ActivityMainBinding
+
+    private val nfcReaderCallback = NfcAdapter.ReaderCallback { tag ->
+        onTagDiscovered(tag)
+    }
 
     private var pn532Manager: Pn532Manager? = null
 
@@ -220,7 +225,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateWriteDialogMessage(message: String) {
-        writeDialog?.findViewById<android.widget.TextView>(R.id.text_dialog_message)?.text = message
+        runOnUiThread {
+            writeDialog?.findViewById<TextView>(R.id.text_dialog_message)?.text = message
+        }
     }
 
     // Bluetooth functions
@@ -485,12 +492,25 @@ class MainActivity : AppCompatActivity() {
     // NFC functions
     override fun onResume() {
         super.onResume()
-        enableNfcForegroundDispatch()
+        val options = Bundle()
+        // Workaround for some devices: prevent the system from playing a sound
+        // options.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250)
+        
+        nfcAdapter?.enableReaderMode(
+            this,
+            nfcReaderCallback,
+            NfcAdapter.FLAG_READER_NFC_A or 
+            NfcAdapter.FLAG_READER_NFC_B or 
+            NfcAdapter.FLAG_READER_NFC_F or 
+            NfcAdapter.FLAG_READER_NFC_V or 
+            NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
+            options
+        )
     }
 
     override fun onPause() {
         super.onPause()
-        nfcAdapter?.disableForegroundDispatch(this)
+        nfcAdapter?.disableReaderMode(this)
     }
 
     override fun onDestroy() {
@@ -503,16 +523,42 @@ class MainActivity : AppCompatActivity() {
         activeControllers.clear()
     }
 
-    private fun enableNfcForegroundDispatch() {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+    private fun onTagDiscovered(tag: Tag) {
+        Timber.d("Tag discovered via Reader Mode")
+        
+        if (mediaIdToWrite != null) {
+            writeToTag(tag, mediaIdToWrite!!, mediaTypeToWrite!!)
+            return
         }
-        val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_MUTABLE)
-        } else {
-            PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT)
+
+        val ndef = Ndef.get(tag)
+        if (ndef == null) {
+            Timber.d("Tag is not NDEF formatted")
+            return
         }
-        nfcAdapter?.enableForegroundDispatch(this, pendingIntent, null, null)
+
+        try {
+            ndef.connect()
+            val message = ndef.ndefMessage
+            if (message != null) {
+                for (record in message.records) {
+                    val uri = record.toUri()
+                    if (uri != null && (uri.scheme == "nfcmp" || uri.scheme == "nfca")) {
+                        Timber.d("Found URI on tag: $uri")
+                        runOnUiThread {
+                            extractAndPlayMedia(uri)
+                        }
+                        break
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Error reading NDEF from tag")
+        } finally {
+            try {
+                ndef.close()
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -546,9 +592,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         when (intent.action) {
-            NfcAdapter.ACTION_NDEF_DISCOVERED,
-            NfcAdapter.ACTION_TECH_DISCOVERED,
-            NfcAdapter.ACTION_TAG_DISCOVERED -> {
+            NfcAdapter.ACTION_NDEF_DISCOVERED -> {
                 val tag = IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag::class.java)
                 if (mediaIdToWrite != null && tag != null) {
                     writeToTag(tag, mediaIdToWrite!!, mediaTypeToWrite!!)
@@ -593,7 +637,9 @@ class MainActivity : AppCompatActivity() {
             if (writeDialog != null) {
                 updateWriteDialogMessage("$error. Prøv en annen tag.")
             } else {
-                Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                runOnUiThread {
+                    Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                }
             }
             return
         }
@@ -612,6 +658,9 @@ class MainActivity : AppCompatActivity() {
             MediaTypes.PHONE_NUMBER -> {
                 typeIndicator = "ph"
             }
+            MediaTypes.UNKNOWN -> {
+                // Should not happen
+            }
         }
 
         val uri = "nfca://e?$typeIndicator=$mediaId"
@@ -625,7 +674,9 @@ class MainActivity : AppCompatActivity() {
                 if (writeDialog != null) {
                     updateWriteDialogMessage("$error. Prøv en annen tag.")
                 } else {
-                    Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                    runOnUiThread {
+                        Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                    }
                 }
                 return
             }
@@ -634,21 +685,27 @@ class MainActivity : AppCompatActivity() {
                 if (writeDialog != null) {
                     updateWriteDialogMessage("$error. Prøv en annen tag.")
                 } else {
-                    Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                    runOnUiThread {
+                        Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                    }
                 }
                 return
             }
             ndef.writeNdefMessage(message)
             mediaIdToWrite = null
-            writeDialog?.dismiss()
-            Snackbar.make(binding.root, "Tag date skrevet!", Snackbar.LENGTH_SHORT).show()
+            runOnUiThread {
+                writeDialog?.dismiss()
+                Snackbar.make(binding.root, "Data skrevet til NFC tag!", Snackbar.LENGTH_SHORT).show()
+            }
         } catch (e: Exception) {
             Timber.e(e, "Error writing to tag")
             val error = "Feil ved skriving til tag"
             if (writeDialog != null) {
                 updateWriteDialogMessage("$error. Prøv igjen.")
             } else {
-                Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                runOnUiThread {
+                    Snackbar.make(binding.root, error, Snackbar.LENGTH_SHORT).show()
+                }
             }
         } finally {
             try {
