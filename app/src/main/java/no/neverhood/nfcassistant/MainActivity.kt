@@ -35,13 +35,19 @@ import com.google.android.material.snackbar.Snackbar
 import no.neverhood.nfcassistant.databinding.ActivityMainBinding
 import timber.log.Timber
 import androidx.core.net.toUri
+import java.time.Instant
 
 
 class MainActivity : AppCompatActivity() {
+    // Current media vars
     private var currentMediaId = ""
+    private var currentMediaTitle = ""
     private var currentMediaType: Enum<MediaTypes> = MediaTypes.UNKNOWN
     private var currentMediaIsPlaying = false
+    private var lastMediaPlay: Instant = Instant.MIN
     private var youTubeVariant: MediaTypes = MediaTypes.YOUTUBE
+
+    // Write vars
     private var mediaIdToWrite: String? = null
     private var mediaTypeToWrite: Enum<MediaTypes>? = null
     private var writeDialog: AlertDialog? = null
@@ -311,7 +317,17 @@ class MainActivity : AppCompatActivity() {
 
         Timber.d("Media Metadata: title=$title, artist=$artist, mediaId=$mediaId")
 
-        if (mediaId != null) {
+        if (mediaId == null) {
+            // Use media title as fallback when media ID is not provided
+            if (currentMediaTitle == "") {
+                Timber.d("New song detected: $title")
+                currentMediaTitle = title ?: ""
+            } else if (currentMediaTitle != title) {
+                // Reset media ID when title changes
+                Timber.d("Title change detected. Resetting currentMediaID.")
+                currentMediaId = ""
+            }
+        } else {
             if (mediaId.startsWith("spotify:track:")) {
                 currentMediaId = mediaId.substringAfter("spotify:track:")
                 Timber.d("Extracted Spotify ID: $currentMediaId")
@@ -360,6 +376,11 @@ class MainActivity : AppCompatActivity() {
 
     // YouTube functions
     fun extractAndPlayMedia(data: android.net.Uri) {
+        // Debounce to avoid multiple calls
+        val now = Instant.now()
+        if (lastMediaPlay.plusSeconds(5) > now) return
+        lastMediaPlay = now
+
         // TODO: Move write operations here and support writing to external device?
         val youTubeId = data.getQueryParameter("yt") ?: data.toString().substringAfter("yt=", "")
         if (youTubeId.isNotBlank()) {
@@ -378,6 +399,7 @@ class MainActivity : AppCompatActivity() {
         }
         Timber.d("Playing media: $mediaId")
         currentMediaId = mediaId
+        currentMediaTitle = ""
         currentMediaType = mediaType
 
         var uri: Uri? = null
