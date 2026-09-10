@@ -95,8 +95,10 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val allGranted = permissions.entries.all { it.value }
-        if (!allGranted) {
-            Snackbar.make(binding.root, "Bluetooth permissions are required", Snackbar.LENGTH_INDEFINITE)
+        if (allGranted) {
+            checkBluetoothState()
+        } else {
+            Snackbar.make(binding.root, "Bluetooth and Location permissions are required", Snackbar.LENGTH_INDEFINITE)
                 .setAction("Retry") { checkPermissionsAndInit() }
                 .show()
         }
@@ -127,7 +129,7 @@ class MainActivity : AppCompatActivity() {
         // Bluetooth state receiver
         val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
         registerReceiver(bluetoothStateReceiver, filter)
-        checkBluetoothState()
+        // checkBluetoothState() // Removed to avoid race condition with permissions
 
         // Init MediaSessionManager
         mediaSessionManager = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
@@ -161,6 +163,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkBluetoothState() {
+        if (!hasBluetoothPermissions()) return
+
         val bluetoothManager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
         val bluetoothAdapter = bluetoothManager.adapter
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
@@ -197,14 +201,31 @@ class MainActivity : AppCompatActivity() {
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         } else {
             permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
         }
 
         val missingPermissions = permissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
 
-        if (!missingPermissions.isEmpty()) {
+        if (missingPermissions.isEmpty()) {
+            checkBluetoothState()
+        } else {
             requestPermissionLauncher.launch(missingPermissions.toTypedArray())
+        }
+    }
+
+    private fun hasBluetoothPermissions(): Boolean {
+        val permissions = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+            permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
+        return permissions.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
     }
 
