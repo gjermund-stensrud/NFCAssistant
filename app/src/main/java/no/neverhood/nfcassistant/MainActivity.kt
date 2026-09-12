@@ -19,10 +19,7 @@ import android.nfc.tech.Ndef
 import android.os.Build
 import android.os.Bundle
 import android.app.ActivityOptions
-import android.media.MediaMetadata
-import android.media.session.MediaController
 import android.media.session.MediaSessionManager
-import android.media.session.PlaybackState
 import android.widget.TextView
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -40,7 +37,6 @@ import timber.log.Timber
 import androidx.core.net.toUri
 import java.time.Instant
 
-
 class MainActivity : AppCompatActivity() {
     private val PREFS_NAME = "nfc_assistant_prefs"
     private val KEY_YOUTUBE_VARIANT = "youtube_variant"
@@ -50,10 +46,9 @@ class MainActivity : AppCompatActivity() {
 
     // Current media vars
     private var currentMediaId = ""
-    private var currentMediaTitle = ""
     private var currentMediaType: Enum<MediaTypes> = MediaTypes.UNKNOWN
-    private var currentMediaIsPlaying = false
-    private var lastMediaPlay: Instant = Instant.MIN
+    private var lastMediaPlay: Instant = Instant.MIN // When was the last media play fired, used for debounce
+    private var currentMediaPlay: Instant = Instant.MIN // When was the current media play started, used to detect song change
 
     // Write vars
     private var mediaIdToWrite: String? = null
@@ -71,28 +66,6 @@ class MainActivity : AppCompatActivity() {
     private var pn532Manager: Pn532Manager? = null
 
     private lateinit var mediaSessionManager: MediaSessionManager
-    private val activeControllers = mutableMapOf<String, MediaController>()
-
-    private val packageNames = mapOf(
-        MediaTypes.YOUTUBE to "com.google.android.youtube",
-        MediaTypes.YOUTUBE_MUSIC to "com.google.android.apps.youtube.music",
-        MediaTypes.SPOTIFY to "com.spotify.music",
-        MediaTypes.TIDAL to "com.aspiro.tidal"
-    )
-
-    private val mediaControllerCallback = object : MediaController.Callback() {
-        override fun onMetadataChanged(metadata: MediaMetadata?) {
-            metadata?.let { handleMediaMetadata(it) }
-        }
-
-        override fun onPlaybackStateChanged(state: PlaybackState?) {
-            state?.let { handleMediaPlaybackState(it) }
-        }
-    }
-
-    private val sessionsChangedListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
-        updateActiveControllers(controllers)
-    }
 
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -148,19 +121,10 @@ class MainActivity : AppCompatActivity() {
         // Bluetooth state receiver
         val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
         registerReceiver(bluetoothStateReceiver, filter)
-        // checkBluetoothState() // Removed to avoid race condition with permissions
 
         // Init MediaSessionManager
         mediaSessionManager = getSystemService(MEDIA_SESSION_SERVICE) as MediaSessionManager
         checkNotificationPermission()
-        if (isNotificationServiceEnabled()) {
-            mediaSessionManager.addOnActiveSessionsChangedListener(
-                sessionsChangedListener,
-                ComponentName(this, MediaNotificationListenerService::class.java)
-            )
-            // Initial check for active sessions
-            updateActiveControllers(mediaSessionManager.getActiveSessions(ComponentName(this, MediaNotificationListenerService::class.java)))
-        }
 
         // Load and set YouTube variant
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -309,79 +273,7 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    private fun updateActiveControllers(controllers: List<MediaController>?) {
-        val newControllers = controllers ?: emptyList()
-        val supportedPackages = packageNames.values
-
-        // Remove controllers that are no longer active
-        val iterator = activeControllers.entries.iterator()
-        while (iterator.hasNext()) {
-            val entry = iterator.next()
-            if (newControllers.none { it.sessionToken == entry.value.sessionToken }) {
-                entry.value.unregisterCallback(mediaControllerCallback)
-                iterator.remove()
-                Timber.d("Controller removed for: ${entry.key}")
-            }
-        }
-
-        // Add or update controllers
-        newControllers.forEach { controller ->
-            if (supportedPackages.contains(controller.packageName)) {
-                val existing = activeControllers[controller.packageName]
-                if (existing?.sessionToken != controller.sessionToken) {
-                    existing?.unregisterCallback(mediaControllerCallback)
-                    controller.registerCallback(mediaControllerCallback)
-                    activeControllers[controller.packageName] = controller
-                    Timber.d("Controller bound for: ${controller.packageName}")
-
-                    controller.metadata?.let { handleMediaMetadata(it) }
-                    controller.playbackState?.let { handleMediaPlaybackState(it) }
-                }
-            }
-        }
-    }
-
-    private fun handleMediaMetadata(metadata: MediaMetadata) {
-        val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
-        val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)
-        val mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
-
-        Timber.d("Media Metadata: title=$title, artist=$artist, mediaId=$mediaId")
-
-        if (mediaId == null) {
-            // Use media title as fallback when media ID is not provided
-            if (currentMediaTitle == "") {
-                Timber.d("New song detected: $title")
-                currentMediaTitle = title ?: ""
-            } else if (currentMediaTitle != title) {
-                // Reset media ID when title changes
-                Timber.d("Title change detected. Resetting currentMediaID.")
-                currentMediaId = ""
-            }
-        } else {
-            if (mediaId.startsWith("spotify:track:")) {
-                currentMediaId = mediaId.substringAfter("spotify:track:")
-                Timber.d("Extracted Spotify ID: $currentMediaId")
-            } else if (mediaId.length == 11) { // Common length for YT video IDs
-                currentMediaId = mediaId
-            }
-        }
-    }
-
-    private fun handleMediaPlaybackState(state: PlaybackState) {
-        currentMediaIsPlaying = state.state == PlaybackState.STATE_PLAYING
-        Timber.d("Media Playback State: playing=$currentMediaIsPlaying")
-    }
-
     // Parser functions
-    private enum class MediaTypes {
-        UNKNOWN,
-        YOUTUBE,
-        YOUTUBE_MUSIC,
-        SPOTIFY,
-        TIDAL,
-        PHONE_NUMBER,
-    }
 
     private fun extractYoutubeId(url: String): String? {
         val patterns = listOf(
@@ -406,7 +298,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // YouTube functions
-    fun extractAndPlayMedia(data: android.net.Uri) {
+    fun extractAndPlayMedia(data: Uri) {
         // Debounce to avoid multiple calls
         val now = Instant.now()
         if (lastMediaPlay.plusSeconds(5) > now) return
@@ -424,16 +316,37 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun playMedia(mediaId: String, mediaType: Enum<MediaTypes>) {
-        if (mediaId == currentMediaId && mediaType == currentMediaType && currentMediaIsPlaying) {
-            Timber.d("Already playing $mediaId on $mediaType")
-            return
-        }
         Timber.d("Playing media: $mediaId")
+
+        val packageName = packageNames[mediaType]
+        val controller = MediaNotificationListenerService.getActiveControllers()[packageName]
+
+        // Smart "Already Playing" check using the real-time controller state
+        if (controller != null && MediaNotificationListenerService.getIsPlaying()) {
+            val playingMediaId = MediaNotificationListenerService.getPlayingMediaId()
+            if (playingMediaId != "" && playingMediaId == mediaId) {
+                Timber.d("Already playing $mediaId on $mediaType (via real-time session check)")
+                return
+            }
+
+            if (playingMediaId == "") {
+                // If controller does not report playing media ID
+                // Check if the same media ID is scanned again and there hasn't been any title change since last play
+                val playingMediaTitle = MediaNotificationListenerService.getPlayingMediaTitle()
+                val lastTitleChange = MediaNotificationListenerService.getLastTitleChange()
+                if (mediaId == currentMediaId && mediaType == currentMediaType && playingMediaTitle != "" && lastTitleChange < currentMediaPlay.plusSeconds(5)) {
+                    Timber.d("Already playing $playingMediaTitle on $mediaType (via real-time session check)")
+                    return
+                }
+            }
+        }
+
         currentMediaId = mediaId
-        currentMediaTitle = ""
         currentMediaType = mediaType
+        currentMediaPlay = Instant.now()
 
         var uri: Uri? = null
+        // ... build URI ...
         when (mediaType) {
             MediaTypes.YOUTUBE -> {
                 uri = "https://www.youtube.com/watch?v=$mediaId".toUri()
@@ -447,23 +360,17 @@ class MainActivity : AppCompatActivity() {
             MediaTypes.TIDAL -> {
                 uri = "tidal://track/$mediaId".toUri()
             }
-            MediaTypes.PHONE_NUMBER -> {
-                // Not a media type
-            }
+            MediaTypes.PHONE_NUMBER -> {}
+            MediaTypes.UNKNOWN -> {}
         }
 
         if (uri != null) {
-            // Try to use MediaController if the app has an active session
-            val packageName = packageNames[mediaType]
-            val controller = activeControllers[packageName]
-
-            // YouTube works well with MediaController, but Spotify often triggers BAL blocks.
-            // For Spotify, we use a PendingIntent with an explicit BAL bypass.
             if (controller != null && mediaType != MediaTypes.SPOTIFY) {
                 Timber.d("Media controller found for $packageName, sending play command")
                 controller.transportControls.playFromUri(uri, null)
                 return
             }
+            // ... (rest of the PendingIntent logic)
 
             Timber.d("Launching $packageName via Intent with BAL bypass")
             val intent = Intent(Intent.ACTION_VIEW, uri).apply {
@@ -516,11 +423,6 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(bluetoothStateReceiver)
-        if (::mediaSessionManager.isInitialized) {
-            mediaSessionManager.removeOnActiveSessionsChangedListener(sessionsChangedListener)
-        }
-        activeControllers.values.forEach { it.unregisterCallback(mediaControllerCallback) }
-        activeControllers.clear()
     }
 
     private fun onTagDiscovered(tag: Tag) {
