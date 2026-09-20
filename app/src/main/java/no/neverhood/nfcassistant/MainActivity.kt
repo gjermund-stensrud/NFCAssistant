@@ -52,7 +52,7 @@ class MainActivity : AppCompatActivity() {
 
     // Write vars
     private var mediaIdToWrite: String? = null
-    private var mediaTypeToWrite: Enum<MediaTypes>? = null
+    private var tagTypeToWrite: Enum<TagTypes>? = null
     private var writeDialog: AlertDialog? = null
 
     // Resources
@@ -275,6 +275,12 @@ class MainActivity : AppCompatActivity() {
 
     // Parser functions
 
+    private fun extractYoutubeListId(url: String): String? {
+        val regex = Regex("list=([^&<]+)")
+        val match = regex.find(url)
+        return match?.groupValues?.get(1)
+    }
+
     private fun extractYoutubeId(url: String): String? {
         val patterns = listOf(
             "v=([^&]+)",
@@ -290,10 +296,10 @@ class MainActivity : AppCompatActivity() {
         return null
     }
 
-    private fun extractSpotifyId(url: String): String? {
-        val regex = Regex("https://open.spotify.com/track/([a-zA-Z0-9]+)")
+    private fun extractSpotifyId(url: String): Pair<String, String>? {
+        val regex = Regex("https://open.spotify.com/(track|playlist|album)/([a-zA-Z0-9]+)")
         val match = regex.find(url)
-        if (match != null) return match.groupValues[1]
+        if (match != null) return Pair(match.groupValues[1], match.groupValues[2])
         return null
     }
 
@@ -307,15 +313,27 @@ class MainActivity : AppCompatActivity() {
         // TODO: Move write operations here and support writing to external device?
         val youTubeId = data.getQueryParameter("yt") ?: data.toString().substringAfter("yt=", "")
         if (youTubeId.isNotBlank()) {
-            playMedia(youTubeId, youTubeVariant)
+            playMedia(youTubeId, youTubeVariant, TagTypes.YOUTUBE)
+        }
+        val youTubeListId = data.getQueryParameter("ytl") ?: data.toString().substringAfter("ytl=", "")
+        if (youTubeListId.isNotBlank()) {
+            playMedia(youTubeListId, youTubeVariant, TagTypes.YOUTUBE_LIST)
         }
         val spotifyId = data.getQueryParameter("sp") ?: data.toString().substringAfter("sp=", "")
         if (spotifyId.isNotBlank()) {
-            playMedia(spotifyId, MediaTypes.SPOTIFY)
+            playMedia(spotifyId, MediaTypes.SPOTIFY, TagTypes.SPOTIFY)
+        }
+        val spotifyListId = data.getQueryParameter("spl") ?: data.toString().substringAfter("spl=", "")
+        if (spotifyListId.isNotBlank()) {
+            playMedia(spotifyListId, MediaTypes.SPOTIFY, TagTypes.SPOTIFY_LIST)
+        }
+        val spotifyAlbumId = data.getQueryParameter("spa") ?: data.toString().substringAfter("spa=", "")
+        if (spotifyAlbumId.isNotBlank()) {
+            playMedia(spotifyAlbumId, MediaTypes.SPOTIFY, TagTypes.SPOTIFY_ALBUM)
         }
     }
 
-    private fun playMedia(mediaId: String, mediaType: Enum<MediaTypes>) {
+    private fun playMedia(mediaId: String, mediaType: Enum<MediaTypes>, tagType: Enum<TagTypes>) {
         Timber.d("Playing media: $mediaId")
 
         val packageName = packageNames[mediaType]
@@ -345,22 +363,37 @@ class MainActivity : AppCompatActivity() {
         currentMediaType = mediaType
         currentMediaPlay = Instant.now()
 
+        var playType = "v"
+        when (tagType) {
+            TagTypes.YOUTUBE_LIST -> {
+                playType = "list"
+            }
+            TagTypes.SPOTIFY -> {
+                playType = "track"
+            }
+            TagTypes.SPOTIFY_LIST -> {
+                playType = "playlist"
+            }
+            TagTypes.SPOTIFY_ALBUM -> {
+                playType = "album"
+            }
+        }
+
         var uri: Uri? = null
         // ... build URI ...
         when (mediaType) {
             MediaTypes.YOUTUBE -> {
-                uri = "https://www.youtube.com/watch?v=$mediaId".toUri()
+                uri = "https://www.youtube.com/watch?$playType=$mediaId".toUri()
             }
             MediaTypes.YOUTUBE_MUSIC -> {
-                uri = "https://music.youtube.com/watch?v=$mediaId".toUri()
+                uri = "https://music.youtube.com/watch?$playType=$mediaId".toUri()
             }
             MediaTypes.SPOTIFY -> {
-                uri = "spotify:track:$mediaId".toUri()
+                uri = "spotify:$playType:$mediaId".toUri()
             }
             MediaTypes.TIDAL -> {
                 uri = "tidal://track/$mediaId".toUri()
             }
-            MediaTypes.PHONE_NUMBER -> {}
             MediaTypes.UNKNOWN -> {}
         }
 
@@ -429,7 +462,7 @@ class MainActivity : AppCompatActivity() {
         Timber.d("Tag discovered via Reader Mode")
         
         if (mediaIdToWrite != null) {
-            writeToTag(tag, mediaIdToWrite!!, mediaTypeToWrite!!)
+            writeToTag(tag, mediaIdToWrite!!, tagTypeToWrite!!)
             return
         }
 
@@ -480,14 +513,27 @@ class MainActivity : AppCompatActivity() {
                 val videoId = extractYoutubeId(sharedText)
                 if (videoId != null) {
                     mediaIdToWrite = videoId
-                    mediaTypeToWrite = MediaTypes.YOUTUBE
+                    tagTypeToWrite = TagTypes.YOUTUBE
                     showWriteDialog()
+                    return
                 }
-                val spotifyId = extractSpotifyId(sharedText)
-                if (spotifyId != null) {
-                    mediaIdToWrite = spotifyId
-                    mediaTypeToWrite = MediaTypes.SPOTIFY
+                val listId = extractYoutubeListId(sharedText)
+                if (listId != null) {
+                    mediaIdToWrite = listId
+                    tagTypeToWrite = TagTypes.YOUTUBE_LIST
                     showWriteDialog()
+                    return
+                }
+                val spotifyPair = extractSpotifyId(sharedText)
+                if (spotifyPair != null) {
+                    mediaIdToWrite = spotifyPair.second
+                    when (spotifyPair.first) {
+                        "track" -> tagTypeToWrite = TagTypes.SPOTIFY
+                        "playlist" -> tagTypeToWrite = TagTypes.SPOTIFY_LIST
+                        "album" -> tagTypeToWrite = TagTypes.SPOTIFY_ALBUM
+                    }
+                    showWriteDialog()
+                    return
                 }
             }
             return
@@ -497,7 +543,7 @@ class MainActivity : AppCompatActivity() {
             NfcAdapter.ACTION_NDEF_DISCOVERED -> {
                 val tag = IntentCompat.getParcelableExtra(intent, NfcAdapter.EXTRA_TAG, Tag::class.java)
                 if (mediaIdToWrite != null && tag != null) {
-                    writeToTag(tag, mediaIdToWrite!!, mediaTypeToWrite!!)
+                    writeToTag(tag, mediaIdToWrite!!, tagTypeToWrite!!)
                     return
                 }
 
@@ -532,7 +578,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun writeToTag(tag: Tag, mediaId: String, mediaType: Enum<MediaTypes>) {
+    private fun writeToTag(tag: Tag, mediaId: String, tagType: Enum<TagTypes>) {
         val ndef = Ndef.get(tag)
         if (ndef == null) {
             val error = "NFC tag støtter ikke NDEF"
@@ -547,20 +593,29 @@ class MainActivity : AppCompatActivity() {
         }
 
         var typeIndicator = ""
-        when (mediaType) {
-            MediaTypes.YOUTUBE, MediaTypes.YOUTUBE_MUSIC -> {
+        when (tagType) {
+            TagTypes.YOUTUBE -> {
                 typeIndicator = "yt"
             }
-            MediaTypes.SPOTIFY -> {
+            TagTypes.YOUTUBE_LIST -> {
+                typeIndicator = "ytl"
+            }
+            TagTypes.SPOTIFY -> {
                 typeIndicator = "sp"
             }
-            MediaTypes.TIDAL -> {
+            TagTypes.SPOTIFY_LIST -> {
+                typeIndicator = "spl"
+            }
+            TagTypes.SPOTIFY_ALBUM -> {
+                typeIndicator = "spa"
+            }
+            TagTypes.TIDAL -> {
                 typeIndicator = "td"
             }
-            MediaTypes.PHONE_NUMBER -> {
+            TagTypes.PHONE_NUMBER -> {
                 typeIndicator = "ph"
             }
-            MediaTypes.UNKNOWN -> {
+            TagTypes.UNKNOWN -> {
                 // Should not happen
             }
         }

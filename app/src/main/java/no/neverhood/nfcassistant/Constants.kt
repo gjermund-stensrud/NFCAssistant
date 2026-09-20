@@ -1,12 +1,22 @@
 package no.neverhood.nfcassistant
 
+enum class TagTypes {
+    UNKNOWN,
+    YOUTUBE,
+    YOUTUBE_LIST,
+    SPOTIFY,
+    SPOTIFY_LIST,
+    SPOTIFY_ALBUM,
+    TIDAL,
+    PHONE_NUMBER,
+}
+
 enum class MediaTypes {
     UNKNOWN,
     YOUTUBE,
     YOUTUBE_MUSIC,
     SPOTIFY,
     TIDAL,
-    PHONE_NUMBER,
 }
 
 val packageNames = mapOf(
