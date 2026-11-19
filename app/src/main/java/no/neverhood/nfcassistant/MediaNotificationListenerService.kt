@@ -25,8 +25,6 @@ class MediaNotificationListenerService : NotificationListenerService() {
         fun getPlayingMediaId(): String = playingMediaId
         fun getPlayingMediaTitle(): String = playingMediaTitle
         fun getLastTitleChange(): Instant = lastTitleChange
-        
-        fun isRunning(): Boolean = instance != null
     }
 
     private val sessionsChangedListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->

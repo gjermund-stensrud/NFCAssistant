@@ -18,6 +18,7 @@ import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration.Companion.milliseconds
+import androidx.core.content.edit
 
 // HM-10 UUIDs
 private val SERVICE_UUID = UUID.fromString("0000FFE0-0000-1000-8000-00805F9B34FB")
@@ -31,8 +32,6 @@ private val CHAR_READ_UUID   = UUID.fromString("0000FF01-0000-1000-8000-00805F9B
 private val CHAR_WRITE_UUID   = UUID.fromString("0000FF02-0000-1000-8000-00805F9B34FB")
 */
 
-private val wakeupCommand = byteArrayOf(0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff.toByte(), 0x03, 0xfd.toByte(), 0xd4.toByte(), 0x14, 0x01, 0x17, 0x00)
-
 class Pn532Manager(val activity: MainActivity) {
     private var central = BluetoothCentralManager(activity.applicationContext)
 
@@ -40,17 +39,36 @@ class Pn532Manager(val activity: MainActivity) {
     private val responseBuffer = ByteArrayOutputStream()
     private var responseDeferred: CompletableDeferred<ByteArray>? = null
 
-    private val swVersionCommand = buildPn532Frame(0x02) // byteArrayOf(0x00, 0x00, 0xff.toByte(), 0x02, 0xfe.toByte(), 0xd4.toByte(), 0x02, 0x2a, 0x00)
-    private val inListPassiveTargetCommand = buildPn532Frame(0x4a, byteArrayOf(0x01, 0x00)) // byteArrayOf(0x00, 0x00, 0xff.toByte(), 0x04, 0xfc.toByte(), 0xd4.toByte(), 0x4a, 0x01, 0x00, 0xe1.toByte(), 0x00)
+    // PN532 messages
+    private val wakeupCommand = byteArrayOf(0x55, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff.toByte(), 0x03, 0xfd.toByte(), 0xd4.toByte(), 0x14, 0x01, 0x17, 0x00)
+    private val swVersionCommand = buildPn532Frame(0x02)
+    private val configureRetryAndTimeoutCommand = buildPn532Frame(0x32, byteArrayOf(0x05, 0xFF.toByte(), 0x01, 0x05)) // MaxRetries=05, MxRtyATR=FF, MxRtyPSL=01, MxRtyPassiveActivation=0x05
+    private val inListPassiveTargetCommand = buildPn532Frame(0x4a, byteArrayOf(0x01, 0x00))
+    private val turnOffRfFieldCommand = buildPn532Frame(0x32.toByte(), byteArrayOf(0x01, 0x00))
 
     private fun startScan() {
         activity.setStatus("Søker etter ekstern enhet...")
+        // Try auto-connecting to saved address if available
+        val prefs = activity.getSharedPreferences("nfc_assistant_prefs", android.content.Context.MODE_PRIVATE)
+        val savedAddress = prefs.getString("key_bt_address", null)
+        if (savedAddress != null) {
+            try {
+                Timber.i("Attempting autoConnectPeripheral with saved address: $savedAddress")
+                val peripheral = central.getPeripheral(savedAddress)
+                central.autoConnectPeripheral(peripheral)
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to autoConnect with saved address")
+            }
+        }
+
         // TODO Scan using services instead of names and support Minicopy
         central.scanForPeripheralsWithNames(arrayOf("NFC-MediaPlayer"),
             { peripheral, scanResult ->
                 Timber.i("Found peripheral '${peripheral.name}' with RSSI ${scanResult.rssi}")
                 central.stopScan()
                 try {
+                    // Save address for background reconnection (supports switching devices)
+                    prefs.edit { putString("key_bt_address", peripheral.address) }
                     central.autoConnectPeripheral(peripheral)
                 } catch (e: Exception) {
                     Timber.e(e, "Failed to connect to peripheral")
@@ -68,8 +86,7 @@ class Pn532Manager(val activity: MainActivity) {
 
             central.observeConnectionState { peripheral, state ->
                 Timber.i("Peripheral ${peripheral.name} has $state")
-                var statusText: String
-                statusText = when (state) {
+                val statusText: String = when (state) {
                     ConnectionState.CONNECTED -> "Tilkoblet"
                     ConnectionState.CONNECTING -> "Kobler til..."
                     ConnectionState.DISCONNECTED -> "Frakoblet"
@@ -98,15 +115,27 @@ class Pn532Manager(val activity: MainActivity) {
     fun readTagLoop(peripheral: BluetoothPeripheral) {
         // When device is connected. Send wakeup and config sequence
         val wakeupBytes = sendCommand(peripheral, wakeupCommand)
-        if (wakeupBytes[0] != 0xd5.toByte() || wakeupBytes[1] != 0x15.toByte()) {
+        if (wakeupBytes.size != 2 || wakeupBytes[0] != 0xd5.toByte() || wakeupBytes[1] != 0x15.toByte()) {
             // Wakeup failed
             return
         }
 
         // Get swVersion
         val swVersionBytes = sendCommand(peripheral, swVersionCommand)
-        val swVersion = swVersionBytes.toHexString()
+        if (swVersionBytes.size < 4 || swVersionBytes[0] != 0xd5.toByte() || swVersionBytes[1] != 0x03.toByte() || swVersionBytes[2] != 0x32.toByte()) {
+            // SW version request failed
+            return
+        }
+
+        val swVersion = swVersionBytes.toHexString().substring(6)
         Timber.d("SW Version: %s", swVersion)
+
+        // Configure retry and timeout
+        val configBytes = sendCommand(peripheral, configureRetryAndTimeoutCommand)
+        if (configBytes.size != 2 || configBytes[0] != 0xd5.toByte() || configBytes[1] != 0x33.toByte()) {
+            // Configuration failed
+            return
+        }
 
         while (peripheral.getState() == ConnectionState.CONNECTED) {
             // Scan for tag
@@ -118,6 +147,23 @@ class Pn532Manager(val activity: MainActivity) {
             if (isErrorOrTimeout(tagData)) {
                 continue
             }
+
+            // Check if any tags were found before timeout
+            if (tagData.size == 3 && tagData[0] == 0xD5.toByte() && tagData[1] == 0x4b.toByte() && tagData[2] == 0x00.toByte()) {
+                // Turn NFC field off (to save power)
+                val turnOffBytes = sendCommand(peripheral, turnOffRfFieldCommand)
+                if (turnOffBytes.size != 2 || turnOffBytes[0] != 0xd5.toByte() || turnOffBytes[1] != 0x33.toByte()) {
+                    // Turn off failed
+                    Timber.d("Turn of RF field failed. %s", turnOffBytes.toHexString())
+                    continue
+                }
+
+                // PN532 timeout with 0 tags detected
+                Thread.sleep(400) // Wait a while before scanning again (to conserve power)
+                continue
+            }
+
+            Timber.d("ScanBytes: %s", tagData.toHexString())
 
             // Tag detected. Parse serial number and read NDEF
             val tagId = tagData.copyOfRange(8, 8 + tagData[7].toInt()).toHexString()
